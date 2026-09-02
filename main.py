@@ -1,3 +1,6 @@
+import utils.http_session
+import utils.transport
+import utils.session
 import argparse
 import json
 import logging
@@ -17,6 +20,17 @@ from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.remote.webdriver import By
 from selenium.webdriver.support.wait import WebDriverWait
 from seleniumbase import Driver
+
+
+def normalize_url(url):
+    parsed = urlparse(url)
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), parsed.params, parsed.query, ""))
+
+
+def url_reached(current_url, target_url):
+    current = normalize_url(current_url)
+    target = normalize_url(target_url)
+    return current == target or current.startswith(target + "/") or target in current
 
 
 def create_folder(course_title):
@@ -48,7 +62,10 @@ def truncate_title_to_fit_file_name(title, max_file_name_length=250):
 
 
 class TeachableDownloader:
-    def __init__(self, verbose_arg=False, complete_lecture_arg=False, user_agent_arg=None, timeout_arg=10):
+    PROGRESS_FILE = "download-progress.json"
+
+    def __init__(self, verbose_arg=False, complete_lecture_arg=False, user_agent_arg=None, timeout_arg=10,
+                 resume_arg=True):
         self.driver = Driver(uc=True, headed=True)
         self.headers = {
             "User-Agent": user_agent_arg,
@@ -58,6 +75,8 @@ class TeachableDownloader:
         self.verbose = verbose_arg
         self._complete_lecture = complete_lecture_arg
         self.global_timeout = timeout_arg
+        self._resume = resume_arg
+        self._progress = self.load_progress()
 
     def check_elem_exists(self, by, selector, timeout):
         try:
@@ -123,13 +142,19 @@ class TeachableDownloader:
                 logging.error("Could not login: " + str(e), exc_info=self.verbose)
                 return
         else:
-            self.driver.get(course_url)
-            while self.driver.current_url != man_login_url:
+            start_url = login_url if login_url else course_url
+            logging.info("Opening login/start page: " + start_url)
+            self.driver.get(start_url)
+            logging.info(
+                "Log in manually (OTP if prompted), then open your course. "
+                "Waiting for URL to match: " + man_login_url
+            )
+            while not url_reached(self.driver.current_url, man_login_url):
                 time.sleep(3)
-                logging.info("Waiting for user to navigate to url: " + man_login_url)
+                logging.info("Waiting for url match: " + man_login_url)
                 logging.info("Current url: " + self.driver.current_url)
 
-        logging.info("Starting download of course: " + course_url)
+        logging.info("Login detected. Starting download of course: " + course_url)
         try:
             self.pick_course_downloader(course_url)
         except Exception as e:
@@ -170,10 +195,16 @@ class TeachableDownloader:
                 logging.error("Could not login: " + str(e), exc_info=self.verbose)
                 return
         else:
-            self.driver.get(url_array[0])
-            while self.driver.current_url != man_login_url:
+            start_url = login_url if login_url else url_array[0]
+            logging.info("Opening login/start page: " + start_url)
+            self.driver.get(start_url)
+            logging.info(
+                "Log in manually (OTP if prompted), then open your course. "
+                "Waiting for URL to match: " + man_login_url
+            )
+            while not url_reached(self.driver.current_url, man_login_url):
                 time.sleep(3)
-                logging.info("Waiting for user to navigate to url: " + man_login_url)
+                logging.info("Waiting for url match: " + man_login_url)
                 logging.info("Current url: " + self.driver.current_url)
 
         logging.info("Running batch download of courses ")
@@ -261,7 +292,7 @@ class TeachableDownloader:
 
     def pick_course_downloader(self, course_url):
         # Check if we are already on the course page
-        if not self.driver.current_url == course_url:
+        if not url_reached(self.driver.current_url, course_url):
             logging.info("Switching to course page")
             self.driver.get(course_url)
             if self.check_elem_exists(By.ID, "challenge-stage", timeout=self.global_timeout):
@@ -524,71 +555,209 @@ class TeachableDownloader:
 
         self.download_videos_from_links(video_list)
 
+    def load_progress(self):
+        if os.path.isfile(self.PROGRESS_FILE):
+            try:
+                with open(self.PROGRESS_FILE, encoding="utf-8") as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                logging.warning("Could not read progress file, starting fresh: " + str(e))
+        return {"lectures": {}}
+
+    def save_progress(self):
+        try:
+            with open(self.PROGRESS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self._progress, f, indent=2)
+        except OSError as e:
+            logging.warning("Could not save progress file: " + str(e))
+
+    def should_skip_lecture(self, video):
+        if not self._resume:
+            return False
+
+        entry = self._progress.get("lectures", {}).get(video["link"])
+        if not entry or not entry.get("completed"):
+            return False
+
+        download_path = video["download_path"]
+        video_file = entry.get("video_file")
+        if video_file:
+            file_path = os.path.join(download_path, video_file)
+            if not os.path.isfile(file_path) or os.path.getsize(file_path) < 10000:
+                logging.info("Resume: re-downloading (video missing): " + video["title"])
+                self.clean_partial_downloads(download_path, video["idx"], video["title"])
+                return False
+
+        for attachment_file in entry.get("attachment_files", []):
+            file_path = os.path.join(download_path, attachment_file)
+            if not os.path.isfile(file_path):
+                logging.info("Resume: re-downloading (attachment missing): " + video["title"])
+                return False
+
+        return True
+
+    def mark_lecture_complete(self, video, video_file=None, attachment_files=None, html_file=None):
+        if "lectures" not in self._progress:
+            self._progress["lectures"] = {}
+
+        self._progress["lectures"][video["link"]] = {
+            "title": video["title"],
+            "section": os.path.basename(video["download_path"]),
+            "video_file": video_file,
+            "attachment_files": attachment_files or [],
+            "html_file": html_file,
+            "completed": True,
+        }
+        self.save_progress()
+
+    def clean_partial_downloads(self, output_path, video_index, title):
+        if not os.path.isdir(output_path):
+            return
+
+        prefix = "{:02d}-{}".format(video_index, title)
+        partial_suffixes = (".part", ".ytdl", ".temp", ".frag")
+        removed = 0
+        for name in os.listdir(output_path):
+            if not name.startswith(prefix):
+                continue
+            if any(name.endswith(suffix) for suffix in partial_suffixes) or ".part-" in name:
+                try:
+                    os.remove(os.path.join(output_path, name))
+                    removed += 1
+                except OSError as e:
+                    logging.debug("Could not remove partial file " + name + ": " + str(e))
+                continue
+            if name.endswith(".mp4"):
+                file_path = os.path.join(output_path, name)
+                if os.path.getsize(file_path) < 10000:
+                    try:
+                        os.remove(file_path)
+                        removed += 1
+                    except OSError as e:
+                        logging.debug("Could not remove corrupt file " + name + ": " + str(e))
+
+        if removed:
+            logging.info("Resume: cleaned %d partial file(s) for: %s", removed, title)
+
     def download_videos_from_links(self, video_list):
+        total = len(video_list)
+        skipped = sum(1 for video in video_list if self.should_skip_lecture(video))
+        if self._resume:
+            logging.info(
+                "Auto-resume: %d/%d lectures complete, %d remaining",
+                skipped, total, total - skipped
+            )
+
         for video in video_list:
+            if self.should_skip_lecture(video):
+                logging.info("Resume: skipping complete lecture: " + video["title"])
+                continue
+
             if self.driver.current_url != video["link"]:
                 logging.info("Navigating to lecture: " + video["title"])
                 self.driver.get(video["link"])
                 self.driver.implicitly_wait(self.global_timeout)
+
             logging.info("Downloading lecture: " + video["title"])
+            self.disable_autoplay()
 
-            # logging.info("Disabling autoplay")
-            # self.driver.execute_script('var checkbox = document.getElementById("custom-toggle-autoplay");'
-            #                            'if (checkbox.checked) {checkbox.click();}')
-
+            has_player = False
             try:
-                logging.info("Saving html")
-                self.save_webpage_as_html(video["title"], video["idx"], video["download_path"])
-            except Exception as e:
-                logging.error("Could not save html: " + video["title"] + " cause: " + str(e), exc_info=self.verbose)
+                self.wait_for_video_iframe(timeout=45)
+                has_player = len(self.driver.find_elements(
+                    By.XPATH, "//iframe[starts-with(@data-testid, 'embed-player')]"
+                )) > 0
+            except TimeoutException:
+                logging.warning("No video iframe found for lecture: " + video["title"])
 
+            html_file = "{:02d}-{}.html".format(video["idx"], video["title"])
+            html_path = os.path.join(video["download_path"], html_file)
+            if self._resume and os.path.isfile(html_path):
+                logging.info("Skipping existing html: " + html_file)
+            else:
+                try:
+                    logging.info("Saving html")
+                    self.save_webpage_as_html(video["title"], video["idx"], video["download_path"])
+                except Exception as e:
+                    logging.error(
+                        "Could not save html: " + video["title"] + " cause: " + str(e),
+                        exc_info=self.verbose
+                    )
+
+            attachment_files = []
             try:
                 logging.info("Downloading attachments")
-                self.download_attachments(video["link"], video["title"], video["idx"], video["download_path"])
+                attachment_files = self.download_attachments(
+                    video["link"], video["title"], video["idx"], video["download_path"]
+                )
             except Exception as e:
                 logging.warning("Could not download attachments: " + video["title"] + " cause: " + str(e))
-            
+
+            video_file = None
+            video_downloaded = False
             try:
                 logging.debug("Trying to download video as an attachment")
                 if self.download_video_file(video["title"], video["idx"], video["download_path"]):
-                    continue
-
+                    video_downloaded = True
+                    video_file = "{:02d}-{}.mp4".format(video["idx"], video["title"])
             except Exception as e:
                 logging.debug("Could not download video as an attachment: " + video["title"] + " cause: " + str(e))
 
-            video_iframes = self.driver.find_elements(By.XPATH, "//iframe[starts-with(@data-testid, 'embed-player')]")
+            if not video_downloaded and has_player:
+                iframe_count = len(self.driver.find_elements(
+                    By.XPATH, "//iframe[starts-with(@data-testid, 'embed-player')]"
+                ))
+                for i in range(iframe_count):
+                    video_title = video["title"] + ("-" + str(i + 1) if iframe_count > 1 else "")
+                    expected_file = "{:02d}-{}.mp4".format(video["idx"], video_title)
 
-            for i, iframe in enumerate(video_iframes):
-                try:
-                    logging.info("Switching to video frame")
-                    self.driver.switch_to.frame(iframe)
+                    if self.video_already_downloaded(video["download_path"], video["idx"], video_title):
+                        logging.info("Skipping existing video: " + video_title)
+                        video_downloaded = True
+                        video_file = expected_file
+                        continue
 
-                    script_text = self.driver.find_element(By.ID, "__NEXT_DATA__")
-                    json_text = json.loads(script_text.get_attribute("innerHTML"))
-                    link = json_text["props"]["pageProps"]["applicationData"]["mediaAssets"][0]["urlEncrypted"]
+                    self.clean_partial_downloads(video["download_path"], video["idx"], video_title)
 
-                    # Append -n to the video title if there are multiple iframes
-                    video_title = video["title"] + ("-" + str(i + 1) if len(video_iframes) > 1 else "")
+                    link = self.extract_encrypted_video_url(iframe_index=i, timeout=45)
+                    if not link:
+                        logging.warning("Could not find video URL for: " + video_title)
+                        continue
 
-                    try:
-                        logging.info("Downloading subtitle")
-                        self.download_subtitle(link, video_title, video["idx"], video["download_path"])
-                    except Exception as e:
-                        logging.warning("Could not download subtitle: " + video_title + " cause: " + str(e))
+                    if self.download_video(
+                        link, video_title, video["idx"], video["download_path"], retries=3
+                    ):
+                        video_downloaded = True
+                        video_file = expected_file
+                        try:
+                            logging.info("Downloading subtitle")
+                            self.download_subtitle(
+                                link, video_title, video["idx"], video["download_path"]
+                            )
+                        except Exception as e:
+                            logging.warning(
+                                "Could not download subtitle: " + video_title + " cause: " + str(e)
+                            )
+                    else:
+                        logging.warning("Re-extracting URL and retrying download for: " + video_title)
+                        link = self.extract_encrypted_video_url(iframe_index=i, timeout=45)
+                        if link and self.download_video(
+                            link, video_title, video["idx"], video["download_path"], retries=2
+                        ):
+                            video_downloaded = True
+                            video_file = expected_file
 
-                    try:
-                        logging.info("Downloading video")
-                        self.download_video(link, video_title, video["idx"], video["download_path"])
-                    except Exception as e:
-                        logging.warning("Could not download video: " + video_title + " cause: " + str(e))
-
-                    self.driver.switch_to.default_content()  # Switch back to main content before the next iteration
-
-                except Exception as e:
-                    logging.warning("Could not find video: " + video["title"])
-                    continue
-
-            logging.info("Downloaded video: " + video["title"])
+            lecture_success = video_downloaded or not has_player
+            if lecture_success:
+                logging.info("Finished lecture: " + video["title"])
+                self.mark_lecture_complete(
+                    video,
+                    video_file=video_file,
+                    attachment_files=attachment_files,
+                    html_file=html_file if os.path.isfile(html_path) else None,
+                )
+            else:
+                logging.error("Video was NOT downloaded for lecture: " + video["title"])
 
             if self._complete_lecture:
                 try:
@@ -596,6 +765,13 @@ class TeachableDownloader:
                     self.complete_lecture()
                 except Exception as e:
                     logging.warning("Could not complete lecture: " + video["title"] + " cause: " + str(e))
+
+        if self._resume:
+            completed = sum(
+                1 for video in video_list
+                if self._progress.get("lectures", {}).get(video["link"], {}).get("completed")
+            )
+            logging.info("Auto-resume: %d/%d lectures now complete", completed, total)
 
         return
 
@@ -609,7 +785,83 @@ class TeachableDownloader:
             logging.info("Completed lecture")
             time.sleep(3)
 
-    def download_video(self, link, title, video_index, output_path):
+    def expected_video_path(self, output_path, video_index, title):
+        return os.path.join(output_path, "{:02d}-{}.mp4".format(video_index, title))
+
+    def video_already_downloaded(self, output_path, video_index, title, min_bytes=10000):
+        file_path = self.expected_video_path(output_path, video_index, title)
+        return os.path.isfile(file_path) and os.path.getsize(file_path) >= min_bytes
+
+    def disable_autoplay(self):
+        self.driver.switch_to.default_content()
+        try:
+            self.driver.execute_script(
+                'var checkbox = document.getElementById("custom-toggle-autoplay");'
+                'if (checkbox && checkbox.checked) { checkbox.click(); }'
+            )
+            logging.info("Autoplay disabled")
+        except Exception as e:
+            logging.debug("Could not disable autoplay: " + str(e))
+
+    def pause_embedded_player(self):
+        try:
+            self.driver.execute_script(
+                'document.querySelectorAll("video").forEach(function(video) {'
+                '  video.pause();'
+                '  video.autoplay = false;'
+                '  video.currentTime = 0;'
+                '});'
+            )
+            logging.info("Paused embedded player")
+        except Exception as e:
+            logging.debug("Could not pause embedded player: " + str(e))
+
+    def wait_for_video_iframe(self, timeout=45):
+        self.driver.switch_to.default_content()
+        WebDriverWait(self.driver, timeout).until(
+            EC.presence_of_element_located((By.XPATH, "//iframe[starts-with(@data-testid, 'embed-player')]"))
+        )
+
+    def extract_encrypted_video_url(self, iframe_index=0, timeout=45):
+        self.driver.switch_to.default_content()
+        iframes = self.driver.find_elements(
+            By.XPATH, "//iframe[starts-with(@data-testid, 'embed-player')]"
+        )
+        if not iframes or iframe_index >= len(iframes):
+            return None
+
+        self.driver.switch_to.frame(iframes[iframe_index])
+        self.pause_embedded_player()
+
+        def _read_url(driver):
+            try:
+                script_text = driver.find_element(By.ID, "__NEXT_DATA__")
+                json_text = json.loads(script_text.get_attribute("innerHTML"))
+                media_assets = json_text["props"]["pageProps"]["applicationData"]["mediaAssets"]
+                if media_assets and media_assets[0].get("urlEncrypted"):
+                    return media_assets[0]["urlEncrypted"]
+            except Exception:
+                return None
+            return None
+
+        try:
+            link = WebDriverWait(self.driver, timeout).until(lambda d: _read_url(d))
+            logging.info("Extracted encrypted video URL")
+            return link
+        except TimeoutException:
+            logging.warning("Timed out waiting for encrypted video URL")
+            return None
+        finally:
+            self.driver.switch_to.default_content()
+
+    def download_video(self, link, title, video_index, output_path, retries=3):
+        out_path = self.expected_video_path(output_path, video_index, title)
+        if self.video_already_downloaded(output_path, video_index, title):
+            logging.info("Skipping existing video: " + title)
+            return True
+
+        self.clean_partial_downloads(output_path, video_index, title)
+
         ydl_opts = {
             "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
             "merge_output_format": "mp4",
@@ -624,14 +876,32 @@ class TeachableDownloader:
             ],
             "http_headers": self.headers,
             "concurrentfragments": 15,
-            "outtmpl": os.path.join(output_path, "{:02d}-{}.mp4".format(video_index, title)),
+            "outtmpl": out_path.replace(".mp4", ""),
             "verbose": self.verbose,
+            "retries": 10,
+            "fragment_retries": 10,
+            "socket_timeout": 30,
+            "continuedl": True,
         }
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                ydl.download([link])
-        except Exception as e:
-            logging.error("Could not download video: " + title + " cause: " + str(e))
+
+        for attempt in range(1, retries + 1):
+            try:
+                logging.info("Downloading video (attempt %d/%d): %s", attempt, retries, title)
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    ydl.download([link])
+                if self.video_already_downloaded(output_path, video_index, title):
+                    logging.info("Downloaded video: " + title)
+                    return True
+                logging.warning("Download finished but file missing or too small: " + title)
+            except Exception as e:
+                logging.error(
+                    "Could not download video (attempt %d/%d): %s cause: %s",
+                    attempt, retries, title, str(e)
+                )
+            time.sleep(2)
+
+        logging.error("Failed to download video after retries: " + title)
+        return False
 
     # This function is needed because yt-dlp subtitle downloader is not working
     def download_subtitle(self, link, title, video_index, output_path):
@@ -749,28 +1019,68 @@ class TeachableDownloader:
         return True
     
     def download_attachments(self, link, title, video_index, output_path):
-        video_title = "{:02d}-{}".format(video_index, title)
+        video_title_prefix = "{:02d}-{}".format(video_index, title)
+        found_links = {}
 
-        # Grab the video attachments type file
-        video_attachments = self.driver.find_elements(By.CLASS_NAME, "lecture-attachment-type-file")
-        # Get all links from the video attachments
+        for block in self.driver.find_elements(By.CLASS_NAME, "lecture-attachment-type-file"):
+            for anchor in block.find_elements(By.TAG_NAME, "a"):
+                href = anchor.get_attribute("href")
+                if href:
+                    found_links[href] = anchor.text.strip() or None
 
-        if video_attachments:
-            video_links = video_attachments[0].find_elements(By.TAG_NAME, "a")
+        for anchor in self.driver.find_elements(
+            By.CSS_SELECTOR, "a[href*='uploads.teachablecdn.com/attachments']"
+        ):
+            href = anchor.get_attribute("href")
+            if href and href not in found_links:
+                found_links[href] = anchor.text.strip() or None
 
-            output_path = os.path.join(output_path, video_title)
-            os.makedirs(output_path, exist_ok=True)
+        saved_files = []
+        if not found_links:
+            logging.debug("No attachments found for video: " + title)
+            return saved_files
 
-            # Get href attribute from the first link
-            if video_links:
-                for video_link in video_links:
-                    link = video_link.get_attribute("href")
-                    file_name = video_link.text
-                    logging.info("Downloading attachment: " + file_name + " for video: " + title)
-                    # Download file and save the file in output_path directory
-                    wget.download(link, out=output_path)
-        else:
-            logging.warning("No attachments found for video: " + title)
+        session = requests.Session()
+        for cookie in self.driver.get_cookies():
+            session.cookies.set(cookie["name"], cookie["value"])
+
+        for attachment_idx, (attachment_url, display_name) in enumerate(found_links.items(), 1):
+            parsed = urlparse(attachment_url)
+            url_filename = os.path.basename(parsed.path)
+            ext = os.path.splitext(url_filename)[1] or ".pdf"
+
+            if display_name:
+                safe_name = clean_string(display_name)
+                if not safe_name.lower().endswith(ext.lower()):
+                    safe_name += ext
+            else:
+                safe_name = url_filename if url_filename else "attachment" + ext
+
+            if len(found_links) > 1:
+                filename = "{}-{}-{}".format(video_title_prefix, attachment_idx, safe_name)
+            else:
+                filename = "{}-{}".format(video_title_prefix, safe_name)
+
+            file_path = os.path.join(output_path, filename)
+            if os.path.isfile(file_path):
+                logging.info("Skipping existing attachment: " + filename)
+                saved_files.append(filename)
+                continue
+
+            logging.info("Downloading attachment: " + filename)
+            try:
+                response = session.get(attachment_url, headers=self.headers, timeout=120)
+                response.raise_for_status()
+                with open(file_path, "wb") as f:
+                    f.write(response.content)
+                logging.info("Downloaded attachment: " + filename)
+                saved_files.append(filename)
+            except Exception as e:
+                logging.warning(
+                    "Could not download attachment: " + filename + " cause: " + str(e)
+                )
+
+        return saved_files
 
     def save_webpage_as_html(self, title, video_index, output_path):
         output_file = os.path.join(output_path, "{:02d}-{}.html".format(video_index, title))
@@ -819,6 +1129,19 @@ def check_required_args(args):
     return False
 
 
+def setup_logging(log_level, log_file=None):
+    handlers = [logging.StreamHandler(sys.stdout)]
+    if log_file:
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+    logging.basicConfig(
+        level=log_level,
+        format="%(asctime)s %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=handlers,
+        force=True,
+    )
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog='Teachable-Dl', description='Download courses', )
     parser.add_argument("--url", required=False, help='URL of the course')
@@ -836,6 +1159,9 @@ if __name__ == "__main__":
                         default="Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
                                 "Chrome/116.0.0.0 Safari/537.36")
     parser.add_argument("-t", "--timeout", required=False, help='Timeout for selenium driver', default=10)
+    parser.add_argument("--log-file", required=False, help='Also write logs to this file')
+    parser.add_argument("--no-resume", action="store_true", default=False,
+                        help='Disable auto-resume and re-download everything')
     args = parser.parse_args()
     verbose = False
     if args.verbose == 0:
@@ -846,14 +1172,15 @@ if __name__ == "__main__":
         verbose = True
         log_level = logging.DEBUG
 
-    logging.basicConfig(level=log_level, format='%(levelname)s: %(message)s')
+    setup_logging(log_level, args.log_file)
 
     if not check_required_args(args):
         logging.error("Required arguments are missing. Choose email/password or manual login (man_login_url).")
         exit(1)
 
     downloader = TeachableDownloader(verbose_arg=verbose, complete_lecture_arg=args.complete_lecture,
-                                     user_agent_arg=args.user_agent, timeout_arg=args.timeout)
+                                     user_agent_arg=args.user_agent, timeout_arg=args.timeout,
+                                     resume_arg=not args.no_resume)
     if args.file:
         urls = read_urls_from_file(args.file)
         try:

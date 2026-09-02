@@ -235,7 +235,6 @@ celerybeat.pid
 *.sage.py
 
 # Environments
-.env
 .venv
 env/
 venv/
@@ -288,5 +287,10 @@ pyrightconfig.json
 /.idea/modules.xml
 
 courses
-
 downloaded_files/
+download-progress.json
+download.log
+cookies.txt
+*.crdownload
+config.bat
+node_modules

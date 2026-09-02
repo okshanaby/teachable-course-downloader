@@ -1,265 +1,102 @@
-<a name="readme-top"></a>
+# Teachable Course Downloader
 
-<!-- PROJECT SHIELDS -->
+Bulk-download videos and PDF attachments from [Teachable](https://teachable.com)-hosted membership sites (e.g. [Code With Mosh](https://members.codewithmosh.com)).
 
-[![Contributors][contributors-shield]][contributors-url]
-[![Forks][forks-shield]][forks-url]
-[![Stargazers][stars-shield]][stars-url]
-[![Issues][issues-shield]][issues-url]
-[![MIT License][license-shield]][license-url]
+Forked from [FallingLights/Teachable-dl](https://github.com/FallingLights/Teachable-dl) with improvements for OTP login, short videos, PDF attachments, auto-resume, and progress logging.
 
-<!-- PROJECT LOGO -->
-<br />
-<div align="center">
-  <a href="https://github.com/FallingLights/Teachable-Dl">
-    <img src="images/logo.png" alt="Logo" width="80" height="80">
-  </a>
+## Features
 
-<h3 align="center">Teachable-dl</h3>
+- Download all lectures in a course (videos + PDFs), organized by section
+- **Auto-resume** — skips completed lectures; tracks progress in `download-progress.json`
+- OTP / manual login support (no password in shell history)
+- Pauses the video player before extracting download URLs (fixes short lecture failures)
+- Cleans partial downloads on retry
+- Progress log file + `watch-progress.sh` helper
 
-  <p align="center">
-    A downloader for downloading courses from the Teachable platforms.
-    <br />
-    <br />
-    <a href="https://github.com/FallingLights/Teachable-Dl/issues">Report Bug</a>
-    ·
-    <a href="https://github.com/FallingLights/Teachable-Dl/issues">Request Feature</a>
-  </p>
-</div>
+## Requirements
 
-<!-- TABLE OF CONTENTS -->
-<details>
-  <summary>Table of Contents</summary>
-  <ol>
-    <li>
-      <a href="#about-the-project">About The Project</a>
-      <ul>
-        <li><a href="#built-with">Built With</a></li>
-      </ul>
-    </li>
-    <li>
-      <a href="#getting-started">Getting Started</a>
-      <ul>
-        <li><a href="#prerequisites">Prerequisites</a></li>
-        <li><a href="#installation">Installation</a></li>
-      </ul>
-    </li>
-    <li><a href="#usage">Usage</a></li>
-    <li><a href="#roadmap">Roadmap</a></li>
-    <li><a href="#contributing">Contributing</a></li>
-    <li><a href="#license">License</a></li>
-    <li><a href="#contact">Contact</a></li>
-    <li><a href="#acknowledgments">Acknowledgments</a></li>
-  </ol>
-</details>
-
-<!-- ABOUT THE PROJECT -->
-
-## About The Project
-
-<!--[![Product Name Screen Shot][product-screenshot]](https://example.com) -->
-
-Teachable-dl is a Python-based downloader for downloading courses from the Teachable platform. It provides a command-line interface for easily downloading course materials such as videos, slides, and other resources, allowing users to access course content offline at their own pace. With Teachable-dl, users can conveniently download and organize all course materials in a single location, enabling easy access and review of course content without the need for an active internet connection.
-
-⭐ `Star` this repository if you find it valuable and worth maintaining.
-
-👁 `Watch` this repository to get notified about new releases, issues, etc.
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-### Built With
-
-- [![Python][Python.org]][Python-url]
-- [![Selenium][Selenium.org]][Selenium-url]
-- [![yt-dlp][yt-dlp.org]][yt-dlp-url]
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- GETTING STARTED -->
-
-## Getting Started
-
-To get the program up and running follow these simple steps.
-
-### Prerequisites
-
-This is an example of how to list things you need to use the software and how to install them.
-(You can also run this script on a windows machine)
-#### For Linux users
-- yt-dlp
-
-```sh
-python3 -m pip install -U yt-dlp
-```
-
+- Python 3.10+
+- Google Chrome or Chromium
 - ffmpeg
-
-```sh
-sudo apt install ffmpeg
-```
-
 - wget
 
-```sh
-sudo apt install wget
-```
+## Setup
 
-- Chrome
+```bash
+git clone https://github.com/okshanaby/teachable-course-downloader.git
+cd teachable-course-downloader
 
-```sh
-# Ubuntu
-sudo apt install chromium-browser
-
-# Debian
-sudo apt install chromium
-```
-
-#### For Windows users
-- yt-dlp: install using pip. See [yt-dlp's official repo.](https://github.com/yt-dlp/yt-dlp/)
-
-```sh
-python3 -m pip install -U yt-dlp
-```
-
-- ffmpeg: Download and install from [ffmpeg's official website.](https://ffmpeg.org/download.html)
-> Make sure to add ffmpeg to your PATH
-
-- wget: PowerShell has wget installed by default. If you are using Command Prompt, you can install wget using [GNU Wget’s official website.](https://www.gnu.org/software/wget/)
-
-- Chrome: Download and install from [Google Chrome's official website.](https://www.google.com/chrome/)
-
-### Installation
-
-1. Clone the repo
-
-```sh
-git clone https://github.com/FallingLights/Teachable-Dl.git
-```
-
-2. Enter to the project
-
-```sh
-cd Teachable-Dl
-```
-
-3. Set up the environment
-
-```sh
 python3 -m venv env
-```
-
-4. Activate the environment
-
-```sh
 source env/bin/activate
-```
-
-5. Install the requirements
-
-```sh
 pip install -r requirements.txt
 ```
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
+## Code With Mosh (quick start)
 
-<!-- USAGE EXAMPLES -->
+```bash
+./download-mosh-course.sh
+```
 
-## Usage
+1. Chrome opens on the Teachable SSO login page
+2. Enter your email and OTP
+3. Open your course (URL must contain `build-ai-powered-apps` for the default script)
+4. Downloads start automatically
 
-Activate the environment
+Watch progress in a second terminal:
 
-```sh
+```bash
+./watch-progress.sh
+# or: tail -f download.log
+```
+
+Files are saved under `courses/<Course-Name>/<Section>/`.
+
+## Generic Teachable course
+
+```bash
 source env/bin/activate
+
+python3 main.py \
+  --url "https://yourschool.teachable.com/courses/your-course" \
+  --login_url "https://sso.teachable.com/secure/SCHOOL_ID/identity/login/otp" \
+  --man_login_url "https://yourschool.teachable.com/courses/your-course" \
+  --log-file download.log \
+  -vv
 ```
 
-Run the program
+Log in manually in the browser, navigate to the course page, and downloading begins when the URL matches.
 
-```sh
-python3 main.py --url <course_url> --email <email> --password <password>
+## Resume
+
+Auto-resume is **on by default**. Re-run the same command after a crash or Ctrl+C — finished lectures are skipped.
+
+```bash
+./download-mosh-course.sh              # resume
+./download-mosh-course.sh --no-resume  # re-download everything
 ```
 
-or run with manual login
+## Options
 
-```sh
-python3 main.py --url <course_url> --man_login_url <man_login_url> --verbose
+```bash
+python3 main.py --help
 ```
 
-> Make sure to navigate to the url within the first tab and check the console for an exact url match.
+| Flag | Description |
+|------|-------------|
+| `--no-resume` | Disable auto-resume |
+| `--log-file PATH` | Write logs to a file |
+| `-vv` | Verbose output |
+| `-e` / `-p` | Email/password login (optional) |
 
-For a list of all available options and up-to-date parameters, use the --help command:
-```shell
-python main.py --help
-```
+## What is not committed
 
-<!-- ROADMAP -->
+These are gitignored and stay on your machine only:
 
-## Roadmap
-
-See the [open issues](https://github.com/FallingLights/Teachable-Dl/issues) for a full list of proposed features (and known issues).
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- CONTRIBUTING -->
-
-## Contributing
-
-Contributions are what make the open source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
-
-If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
-Don't forget to give the project a star! Thanks again!
-
-1. Fork the Project
-2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the Branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- LICENSE -->
+- `courses/` — downloaded videos and PDFs
+- `env/` — Python virtual environment
+- `download-progress.json` — local resume state
+- `download.log` — run logs
 
 ## License
 
-Distributed under the GNU LGPLv3 License. See `LICENSE.txt` for more information.
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- CONTACT -->
-
-## Contact
-
-[@fallinglight_s](https://twitter.com/fallinglight_s)
-
-Project Link: [https://github.com/FallingLights/Teachable-Dl](https://github.com/FallingLights/Teachable-Dl)
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- ACKNOWLEDGMENTS -->
-
-## Acknowledgments
-
-- [merberich](https://github.com/merberich)
-- [Green0Photon](https://github.com/Green0Photon)
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- MARKDOWN LINKS & IMAGES -->
-<!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
-
-[contributors-shield]: https://img.shields.io/github/contributors/FallingLights/Teachable-Dl.svg?style=for-the-badge
-[contributors-url]: https://github.com/FallingLights/Teachable-Dl/graphs/contributors
-[forks-shield]: https://img.shields.io/github/forks/FallingLights/Teachable-Dl.svg?style=for-the-badge
-[forks-url]: https://github.com/FallingLights/Teachable-Dl/network/members
-[stars-shield]: https://img.shields.io/github/stars/FallingLights/Teachable-Dl.svg?style=for-the-badge
-[stars-url]: https://github.com/FallingLights/Teachable-Dl/stargazers
-[issues-shield]: https://img.shields.io/github/issues/FallingLights/Teachable-Dl.svg?style=for-the-badge
-[issues-url]: https://github.com/FallingLights/Teachable-Dl/issues
-[license-shield]: https://img.shields.io/github/license/FallingLights/Teachable-Dl.svg?style=for-the-badge
-[license-url]: https://github.com/FallingLights/Teachable-Dl/blob/master/LICENSE.txt
-[product-screenshot]: images/screenshot.png
-[Python.org]: https://img.shields.io/badge/Python-14354C?style=for-the-badge&logo=python&logoColor=white
-[Python-url]: https://www.python.org
-[Selenium.org]: https://img.shields.io/badge/Selenium-43B02A?style=for-the-badge&logo=selenium&logoColor=white
-[Selenium-url]: https://www.selenium.dev
-[yt-dlp.org]: https://img.shields.io/badge/yt--dlp-000000?style=for-the-badge&logo=github&logoColor=white
-[yt-dlp-url]: https://github.com/yt-dlp/yt-dlp
+Based on [Teachable-dl](https://github.com/FallingLights/Teachable-dl) (LGPL-3.0). See [LICENSE.txt](LICENSE.txt).
